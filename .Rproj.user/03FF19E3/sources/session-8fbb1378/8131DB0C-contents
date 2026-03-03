@@ -1,0 +1,198 @@
+---
+title: "Breast Cancer Diagnostic Report: XGBoost Analysis"
+author: "Efe Mit"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# 1. Install and Load Necessary Libraries
+# We check if packages are installed; if not, we install them.
+packages <- c("xgboost", "caTools", "caret", "dplyr", "ggplot2", "DiagrammeR")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+```
+
+# 1. Introduction
+
+This report presents a comprehensive analysis of the **Breast Cancer Wisconsin (Original)** dataset using the **XGBoost (Extreme Gradient Boosting)** machine learning algorithm.
+
+Our primary objective is to build a robust classification model to distinguish between **Benign** and **Malignant** tumors and to visualize the underlying decision-making process of the algorithm.
+
+# 2. Data Preparation
+
+We utilize the cleaned dataset (`cleaned_breast_cancer.csv`) where missing values have been handled and the target variable has been binary encoded (0 = Benign, 1 = Malignant).
+
+### 2.1. Loading and Matrix Conversion
+
+XGBoost requires data to be converted into a `xgb.DMatrix` format for optimized computation.
+
+```{r load_data}
+# Load the cleaned dataset
+# Ensure 'cleaned_breast_cancer.csv' is in your working directory from the previous step
+dataset <- read.csv("cleaned_breast_cancer.csv")
+
+# Split Data into Training (75%) and Test (25%) Sets
+set.seed(123)
+split = sample.split(dataset$Class, SplitRatio = 0.75)
+training_set = subset(dataset, split == TRUE)
+test_set = subset(dataset, split == FALSE)
+
+# Convert to XGBoost Matrix Format
+# Features: All columns except the last one (Class)
+# Label: The last column (Class)
+dtrain <- xgb.DMatrix(data = as.matrix(training_set[, -ncol(training_set)]), 
+                      label = training_set$Class)
+
+dtest <- xgb.DMatrix(data = as.matrix(test_set[, -ncol(test_set)]), 
+                     label = test_set$Class)
+```
+
+# 3. Model Training
+
+We train the XGBoost classifier with the following parameters designed to prevent overfitting while maximizing accuracy:
+* **Objective:** Binary Logistic (for 0/1 classification).
+* **Max Depth:** 6 (limits the complexity of individual trees).
+* **Rounds:** 50 (number of boosting iterations).
+
+```{r train_model}
+# Define Hyperparameters
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "error",
+  eta = 0.1,
+  max_depth = 6
+)
+
+# Train the Model
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 50,
+  watchlist = list(train = dtrain, test = dtest),
+  print_every_n = 10,
+  verbose = 0 # Keep the report output clean
+)
+```
+
+# 4. Quantitative Evaluation
+
+### 4.1. Accuracy Calculation
+
+We test the model's performance on the unseen data (Test Set).
+
+```{r accuracy}
+# Predict probabilities
+pred_probs <- predict(xgb_model, newdata = dtest)
+
+# Convert probabilities to binary class (Threshold = 0.5)
+y_pred <- ifelse(pred_probs > 0.5, 1, 0)
+
+# Create Confusion Matrix
+cm <- table(Actual = test_set$Class, Predicted = y_pred)
+
+# Calculate Accuracy
+accuracy <- sum(diag(cm)) / sum(cm)
+cat("Model Accuracy:", round(accuracy * 100, 2), "%")
+```
+
+### 4.2. Confusion Matrix Visualization
+
+The heatmap below illustrates the classification performance.
+* **0:** Benign (Harmless)
+* **1:** Malignant (Cancerous)
+
+```{r cm_plot, fig.align='center'}
+# Prepare data for ggplot
+cm_df <- as.data.frame(cm)
+colnames(cm_df) <- c("Actual", "Predicted", "Frequency")
+
+# Plot Heatmap
+ggplot(data = cm_df, aes(x = Actual, y = Predicted, fill = Frequency)) +
+  geom_tile() +
+  geom_text(aes(label = Frequency), color = "white", size = 8) +
+  scale_fill_gradient(low = "#95a5a6", high = "#2c3e50") +
+  theme_minimal() +
+  labs(title = "Confusion Matrix Heatmap",
+       subtitle = "Actual vs. Predicted Diagnosis",
+       x = "Actual Class (0=Benign, 1=Malignant)",
+       y = "Predicted Class")
+```
+
+### 4.3. Feature Importance
+
+Which biological features are most critical for the diagnosis? XGBoost calculates the "Gain" (importance) for each feature.
+
+```{r feature_importance, fig.align='center'}
+# Compute Importance
+importance_matrix <- xgb.importance(model = xgb_model)
+
+# Plot Top 10 Features
+xgb.plot.importance(importance_matrix, top_n = 10, 
+                    main = "Top 10 Most Important Features",
+                    xlab = "Relative Importance (Gain)")
+```
+
+# 5. Advanced Visualizations
+
+### 5.1. Visualization of Decision Logic (The "Brain")
+
+XGBoost consists of many decision trees. Below, we visualize the **first tree** in the ensemble. This diagram reveals the exact threshold values used by the model to split the patients.
+
+* **Nodes:** Show the feature and the split condition (e.g., `Uniformity_of_Cell_Size < 3.5`).
+* **Leaves:** Show the leaf value (contribution to the final score).
+
+```{r tree_plot, fig.align='center', fig.height=6, fig.width=10}
+# Plot the first tree (Tree index 0)
+# This requires the 'DiagrammeR' package (loaded in setup)
+xgb.plot.tree(model = xgb_model, trees = 0, plot_width = 900, plot_height = 600)
+```
+
+### 5.2. Cluster Analysis: Size vs. Shape (Jitter Plot)
+
+Since the dataset uses integer values (1-10), a standard scatter plot would cause points to overlap, hiding the true density. We use a **"Jitter Plot"** combined with density contours to visualize where Benign vs. Malignant cases cluster.
+
+We focus on the two most important features identified: **Uniformity of Cell Size** and **Uniformity of Cell Shape**.
+
+```{r jitter_plot, fig.align='center'}
+# Jitter Plot with Density Contours
+ggplot(dataset, aes(x = Uniformity_of_Cell_Size, y = Uniformity_of_Cell_Shape, color = as.factor(Class))) +
+  
+  # Add Jitter Points (Transparency added to see overlaps)
+  geom_jitter(width = 0.3, height = 0.3, size = 3, alpha = 0.6) +
+  
+  # Add Density Contours (The "circles" showing high density areas)
+  geom_density_2d(alpha = 0.5, color = "black", linetype = "dotted") +
+  
+  # Custom Colors and Labels
+  scale_color_manual(values = c("#2ecc71", "#e74c3c"), 
+                     name = "Diagnosis",
+                     labels = c("Benign (0)", "Malignant (1)")) +
+  
+  # Titles and Theme
+  labs(title = "Tumor Cluster Analysis",
+       subtitle = "Relationship: Cell Size vs. Cell Shape Uniformity",
+       x = "Uniformity of Cell Size (Scale 1-10)",
+       y = "Uniformity of Cell Shape (Scale 1-10)") +
+  
+  theme_minimal() +
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold", size = 14))
+```
+
+# 6. Conclusion
+
+The XGBoost model successfully classified the breast cancer dataset with high accuracy. 
+
+* **Key Findings:** The analysis confirms that **Uniformity of Cell Size** and **Uniformity of Cell Shape** are the strongest predictors of malignancy.
+* **Visual Insights:** The cluster analysis demonstrates that Benign cases are tightly grouped in the low-score region (1-3), while Malignant cases show a strong correlation between high size irregularity and high shape irregularity.
